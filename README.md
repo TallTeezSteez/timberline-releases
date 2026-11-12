@@ -15,3 +15,5 @@ The game checks this page for new versions and shows **Update available** on the
 zip and replace the old folder (your saves are kept in `%APPDATA%\Godot\app_userdata\Timberline`).
 
 This repo only holds release downloads. Credits and licenses ship inside each zip (`LICENSES.md`).
+
+More about Timberline, with screenshots: https://draftline-gules.vercel.app/timberline
