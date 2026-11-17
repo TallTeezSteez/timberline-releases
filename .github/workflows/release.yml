@@ -1,0 +1,157 @@
+name: Release
+# THE ONE WAY TO PUT OUT A NEW TIMBERLINE (same steps for every app):
+#   GitHub > TallTeezSteez/timberline-releases > Actions > Release > Run workflow.
+#   Version: leave blank to use the version the game says (game/project.godot). What's new: optional.
+# It builds the Windows game on GitHub's free Windows machine (free because this repo is public), smoke-tests it, then
+# publishes one full release with:
+#   Timberline-Windows.zip   same name every time, so this link never changes:
+#                            https://github.com/TallTeezSteez/timberline-releases/releases/latest/download/Timberline-Windows.zip
+# The game's own update check reads this repo's latest release.
+# Timberline only: the version lives in the game files, so bump it there first (project.godot config/version and
+# G.VERSION in game/autoload/G.gd, plus docs/releases/v<version>.md if you want full release text).
+# The game code is the private timberline repo, read with the SOURCE_TOKEN secret. It builds from the "release" branch,
+# where Timberline work happens (main is behind it).
+# Replaces the old build.yml (internal test builds) and release-windows.yml on the sim rig, 16 Nov 2026.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version, like 0.3.1 (blank = the version in the game files)'
+        required: false
+        default: ''
+      notes:
+        description: "What's new (optional, shows on the download page)"
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  APP: Timberline
+  GODOT_VERSION: "4.6.1"
+  SOURCE_BRANCH: release
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: releases
+
+      - name: Get the timberline code (private repo, read with the SOURCE_TOKEN secret)
+        uses: actions/checkout@v4
+        with:
+          repository: TallTeezSteez/timberline
+          ref: ${{ env.SOURCE_BRANCH }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          path: src
+          lfs: false
+
+      - name: Pick the version
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ inputs.version }}
+        run: |
+          V="${V// /}"; V="${V#v}"
+          game=$(sed -n 's/^config\/version="\(.*\)"/\1/p' game/project.godot | tr -d '\r')
+          gd=$(sed -n 's/^const VERSION := "\(.*\)"/\1/p' game/autoload/G.gd | tr -d '\r')
+          [ "$game" = "$gd" ] || { echo "::error::project.godot says $game but G.gd says $gd. Make them match first."; exit 1; }
+          if [ -z "$V" ]; then V="$game"; fi
+          [ "$V" = "$game" ] || { echo "::error::You asked for $V but the game files say $game. Bump the version in the game first."; exit 1; }
+          [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Not a version: $V"; exit 1; }
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$V" >/dev/null 2>&1; then echo "::error::v$V is already released. Bump the version in the game files first."; exit 1; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "Releasing $APP $V"
+
+      - name: Get Godot + export templates
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
+          $v = $env:GODOT_VERSION
+          $dir = Join-Path $env:RUNNER_TEMP "godot"
+          $exe = Join-Path $dir "Godot_v$v-stable_win64_console.exe"
+          $tpl = Join-Path $dir "editor_data\export_templates\$v.stable"
+          $base = "https://github.com/godotengine/godot/releases/download/$v-stable"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          curl.exe -sSfL -o "$dir\godot.zip" "$base/Godot_v$v-stable_win64.exe.zip"
+          Expand-Archive -Force "$dir\godot.zip" $dir; Remove-Item "$dir\godot.zip"
+          New-Item -ItemType File -Force (Join-Path $dir "_sc_") | Out-Null
+          New-Item -ItemType Directory -Force $tpl | Out-Null
+          curl.exe -sSfL -o "$dir\tpl.tpz" "$base/Godot_v$v-stable_export_templates.tpz"
+          tar.exe -xf "$dir\tpl.tpz" -C $dir
+          Get-ChildItem "$dir\templates" | Move-Item -Destination $tpl -Force
+          Remove-Item -Recurse -Force "$dir\templates", "$dir\tpl.tpz"
+          Add-Content -Path $env:GITHUB_ENV -Value "GODOT=$exe"
+          & $exe --version
+
+      - name: Import assets
+        working-directory: src
+        shell: powershell
+        timeout-minutes: 20
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & $env:GODOT --headless --path game --import 2>&1 | Select-Object -Last 20
+          exit 0
+
+      - name: Smoke test (must start and run a short session without errors)
+        working-directory: src
+        shell: powershell
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & $env:GODOT --headless --path game -- --newgame --autoplay --exec=res://ui/tests/session.gd 2>&1 | Tee-Object -FilePath smoke.log
+          $log = Get-Content smoke.log -Raw
+          if ($log -notmatch 'SMOKE OK') { Write-Error "Smoke test didn't finish"; exit 1 }
+          if ($log -match 'SCRIPT ERROR|Parse Error') { Write-Error "Script errors during smoke test"; exit 1 }
+          exit 0
+
+      - name: Export Windows and zip
+        working-directory: src
+        shell: powershell
+        timeout-minutes: 20
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force out\windows | Out-Null
+          & $env:GODOT --headless --path game --export-release "Windows" ../out/windows/Timberline.exe 2>&1 | Select-Object -Last 5
+          if (-not (Test-Path out\windows\Timberline.exe)) { Write-Error "Windows export missing"; exit 1 }
+          $ErrorActionPreference = 'Stop'
+          Copy-Item game\LICENSES.md out\windows\LICENSES.md
+          Copy-Item game\art\LICENSES.md out\windows\LICENSES-art.md
+          Copy-Item game\audio\LICENSES.md out\windows\LICENSES-audio.md
+          Copy-Item game\ui\fonts\OFL.txt out\windows\OFL-IBM-Plex.txt
+          if (Test-Path game\addons\zylann.voxel\LICENSE.md) { Copy-Item game\addons\zylann.voxel\LICENSE.md out\windows\LICENSE-voxel-tools.md }
+          $readme = "Timberline $env:VERSION (early test build)`r`n`r`nUnzip this whole folder, then double-click Timberline.exe (keep the .dll next to it).`r`nIf Windows shows ""Windows protected your PC"": click More info, then Run anyway.`r`nSaves and settings live in %APPDATA%\Godot\app_userdata\Timberline`r`n"
+          [IO.File]::WriteAllText("$PWD\out\windows\READ-ME-FIRST.txt", $readme)
+          tar.exe -a -c -f "$env:GITHUB_WORKSPACE\Timberline-Windows.zip" -C out\windows .
+          if ($LASTEXITCODE -ne 0) { Write-Error "Zip failed"; exit 1 }
+          Get-ChildItem out\windows | Format-Table Name, @{n='MB';e={[math]::Round($_.Length/1MB)}}
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          [ -f Timberline-Windows.zip ] || { echo "::error::The zip is missing"; exit 1; }
+          {
+            echo "$APP $VERSION for Windows (early test build)."
+            if [ -n "${NOTES// /}" ]; then echo; echo "**What's new:** $NOTES"; fi
+            if [ -f "src/docs/releases/v$VERSION.md" ]; then echo; cat "src/docs/releases/v$VERSION.md"; fi
+            echo
+            echo "**Download:** Timberline-Windows.zip below, under Assets. Unzip the whole folder, then double-click Timberline.exe."
+            echo
+            echo "**First time:** if Windows shows \"Windows protected your PC\", click **More info**, then **Run anyway**."
+          } > notes.md
+          gh release create "v$VERSION" Timberline-Windows.zip --repo "$GITHUB_REPOSITORY" --target main \
+            --title "$APP $VERSION" --notes-file notes.md --latest
+          echo "Live: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/Timberline-Windows.zip"
