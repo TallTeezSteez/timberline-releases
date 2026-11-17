@@ -14,7 +14,7 @@ These links always get the newest version. Older versions: [all releases](https:
 
 The game shows **Update available** on the main menu when there's a new version. Download the new zip and replace the old folder.
 
-More about Timberline, with screenshots: https://draftline-gules.vercel.app/timberline
+More about Timberline, with screenshots: https://draftlineapps.com/timberline
 
 Saves and settings live in `%APPDATA%\Godot\app_userdata\Timberline`, so updating keeps them.
 
